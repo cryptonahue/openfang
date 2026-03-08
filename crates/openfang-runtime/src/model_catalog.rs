@@ -613,29 +613,11 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             auth_status: AuthStatus::Missing,
             model_count: 0,
         },
-        ProviderInfo {
-            id: "qwen_intl".into(),
-            display_name: "Qwen — DashScope (International)".into(),
-            api_key_env: "DASHSCOPE_API_KEY".into(),
-            base_url: QWEN_INTL_BASE_URL.into(),
-            key_required: true,
-            auth_status: AuthStatus::Missing,
-            model_count: 0,
-        },
         // DashScope Coding Plan: single API key, multi-brand models
         // (Qwen, Zhipu/GLM, Kimi, MiniMax — all via Alibaba Cloud)
         ProviderInfo {
-            id: "qwen_coding".into(),
-            display_name: "DashScope Coding Plan (China)".into(),
-            api_key_env: "DASHSCOPE_API_KEY".into(),
-            base_url: QWEN_CODING_BASE_URL.into(),
-            key_required: true,
-            auth_status: AuthStatus::Missing,
-            model_count: 0,
-        },
-        ProviderInfo {
             id: "qwen_coding_intl".into(),
-            display_name: "DashScope Coding Plan (International)".into(),
+            display_name: "DashScope Coding Plan".into(),
             api_key_env: "DASHSCOPE_API_KEY".into(),
             base_url: QWEN_CODING_INTL_BASE_URL.into(),
             key_required: true,
@@ -3410,7 +3392,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 39);
+        assert_eq!(catalog.list_providers().len(), 37);
     }
 
     #[test]

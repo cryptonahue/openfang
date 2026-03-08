@@ -86,18 +86,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         needs_key: true,
     },
     ProviderInfo {
-        name: "qwen_intl",
-        env_var: "DASHSCOPE_API_KEY",
-        default_model: "qwen-plus",
-        needs_key: true,
-    },
-    ProviderInfo {
-        name: "qwen_coding",
-        env_var: "DASHSCOPE_API_KEY",
-        default_model: "qwen3-coder-plus",
-        needs_key: true,
-    },
-    ProviderInfo {
         name: "qwen_coding_intl",
         env_var: "DASHSCOPE_API_KEY",
         default_model: "qwen3.5-plus",

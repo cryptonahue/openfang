@@ -161,18 +161,8 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
             api_key_env: "DASHSCOPE_API_KEY",
             key_required: true,
         }),
-        "qwen_intl" | "dashscope_intl" => Some(ProviderDefaults {
-            base_url: QWEN_INTL_BASE_URL,
-            api_key_env: "DASHSCOPE_API_KEY",
-            key_required: true,
-        }),
         // DashScope Coding Plan — multi-brand (Qwen, Zhipu/GLM, Kimi, MiniMax)
-        "qwen_coding" | "dashscope_coding" => Some(ProviderDefaults {
-            base_url: QWEN_CODING_BASE_URL,
-            api_key_env: "DASHSCOPE_API_KEY",
-            key_required: true,
-        }),
-        "qwen_coding_intl" | "dashscope_coding_intl" => Some(ProviderDefaults {
+        "qwen_coding_intl" | "dashscope_coding" | "dashscope_coding_intl" => Some(ProviderDefaults {
             base_url: QWEN_CODING_INTL_BASE_URL,
             api_key_env: "DASHSCOPE_API_KEY",
             key_required: true,
@@ -437,8 +427,6 @@ pub fn known_providers() -> &'static [&'static str] {
         "github-copilot",
         "moonshot",
         "qwen",
-        "qwen_intl",
-        "qwen_coding",
         "qwen_coding_intl",
         "minimax",
         "zhipu",
@@ -537,8 +525,6 @@ mod tests {
         assert!(providers.contains(&"github-copilot"));
         assert!(providers.contains(&"moonshot"));
         assert!(providers.contains(&"qwen"));
-        assert!(providers.contains(&"qwen_intl"));
-        assert!(providers.contains(&"qwen_coding"));
         assert!(providers.contains(&"qwen_coding_intl"));
         assert!(providers.contains(&"minimax"));
         assert!(providers.contains(&"zhipu"));
@@ -547,7 +533,7 @@ mod tests {
         assert!(providers.contains(&"volcengine"));
         assert!(providers.contains(&"codex"));
         assert!(providers.contains(&"claude-code"));
-        assert_eq!(providers.len(), 34);
+        assert_eq!(providers.len(), 32);
     }
 
     #[test]
