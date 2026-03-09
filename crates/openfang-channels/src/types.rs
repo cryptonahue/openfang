@@ -52,6 +52,8 @@ pub enum ChannelContent {
     Voice {
         url: String,
         duration_seconds: u32,
+        /// Optional transcription from Telegram Bot API (native ASR).
+        transcription: Option<String>,
     },
     Location {
         lat: f64,

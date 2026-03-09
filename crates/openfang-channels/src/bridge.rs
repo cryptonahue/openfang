@@ -530,8 +530,13 @@ async fn dispatch_message(
         ChannelContent::File { ref url, ref filename } => {
             format!("[User sent a file ({filename}): {url}]")
         }
-        ChannelContent::Voice { ref url, duration_seconds } => {
-            format!("[User sent a voice message ({duration_seconds}s): {url}]")
+        ChannelContent::Voice { ref url, duration_seconds, ref transcription } => {
+            // Use Telegram's native transcription if available
+            if let Some(text) = transcription {
+                format!("[Audio message ({}s): {}]", duration_seconds, text)
+            } else {
+                format!("[User sent a voice message ({}s): {}]", duration_seconds, url)
+            }
         }
         ChannelContent::Location { lat, lon } => {
             format!("[User shared location: {lat}, {lon}]")
@@ -652,10 +657,21 @@ async fn dispatch_message(
     }
 
     // Route to agent (standard path)
-    let agent_id = router.resolve(
+    // Build binding context with topic_id for forum/thread routing
+    use crate::router::BindingContext;
+    let ctx = BindingContext {
+        channel: ct_str.to_string(),
+        account_id: None,
+        peer_id: message.sender.platform_id.clone(),
+        guild_id: message.metadata.get("guild_id").and_then(|v| v.as_str().map(String::from)),
+        topic_id: message.thread_id.clone(),
+        roles: vec![],
+    };
+    let agent_id = router.resolve_with_context(
         &message.channel,
         &message.sender.platform_id,
         message.sender.openfang_user.as_deref(),
+        &ctx,
     );
 
     let agent_id = match agent_id {

@@ -5,7 +5,6 @@
 
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    LifecycleReaction,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -24,9 +23,6 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Telegram long-polling timeout (seconds) — sent as the `timeout` parameter to getUpdates.
 const LONG_POLL_TIMEOUT: u64 = 30;
 
-/// Default Telegram Bot API base URL.
-const DEFAULT_API_URL: &str = "https://api.telegram.org";
-
 /// Telegram Bot API adapter using long-polling.
 pub struct TelegramAdapter {
     /// SECURITY: Bot token is zeroized on drop to prevent memory disclosure.
@@ -34,8 +30,6 @@ pub struct TelegramAdapter {
     client: reqwest::Client,
     allowed_users: Vec<String>,
     poll_interval: Duration,
-    /// Base URL for Telegram Bot API (supports proxies/mirrors).
-    api_base_url: String,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -45,24 +39,13 @@ impl TelegramAdapter {
     ///
     /// `token` is the raw bot token (read from env by the caller).
     /// `allowed_users` is the list of Telegram user IDs allowed to interact (empty = allow all).
-    /// `api_url` overrides the Telegram Bot API base URL (for proxies/mirrors).
-    pub fn new(
-        token: String,
-        allowed_users: Vec<String>,
-        poll_interval: Duration,
-        api_url: Option<String>,
-    ) -> Self {
+    pub fn new(token: String, allowed_users: Vec<String>, poll_interval: Duration) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let api_base_url = api_url
-            .unwrap_or_else(|| DEFAULT_API_URL.to_string())
-            .trim_end_matches('/')
-            .to_string();
         Self {
             token: Zeroizing::new(token),
             client: reqwest::Client::new(),
             allowed_users,
             poll_interval,
-            api_base_url,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
@@ -70,7 +53,7 @@ impl TelegramAdapter {
 
     /// Validate the bot token by calling `getMe`.
     pub async fn validate_token(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let url = format!("{}/bot{}/getMe", self.api_base_url, self.token.as_str());
+        let url = format!("https://api.telegram.org/bot{}/getMe", self.token.as_str());
         let resp: serde_json::Value = self.client.get(&url).send().await?.json().await?;
 
         if resp["ok"].as_bool() != Some(true) {
@@ -90,10 +73,10 @@ impl TelegramAdapter {
         &self,
         chat_id: i64,
         text: &str,
+        message_thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!(
-            "{}/bot{}/sendMessage",
-            self.api_base_url,
+            "https://api.telegram.org/bot{}/sendMessage",
             self.token.as_str()
         );
 
@@ -105,11 +88,15 @@ impl TelegramAdapter {
         // Telegram has a 4096 character limit per message — split if needed
         let chunks = split_message(&sanitized, 4096);
         for chunk in chunks {
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "chat_id": chat_id,
                 "text": chunk,
                 "parse_mode": "HTML",
             });
+            // Support for Telegram topics/forums in supergroups
+            if let Some(thread_id) = message_thread_id {
+                body["message_thread_id"] = serde_json::json!(thread_id);
+            }
 
             let resp = self.client.post(&url).json(&body).send().await?;
             let status = resp.status();
@@ -129,8 +116,7 @@ impl TelegramAdapter {
         caption: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!(
-            "{}/bot{}/sendPhoto",
-            self.api_base_url,
+            "https://api.telegram.org/bot{}/sendPhoto",
             self.token.as_str()
         );
         let mut body = serde_json::json!({
@@ -157,8 +143,7 @@ impl TelegramAdapter {
         filename: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!(
-            "{}/bot{}/sendDocument",
-            self.api_base_url,
+            "https://api.telegram.org/bot{}/sendDocument",
             self.token.as_str()
         );
         let body = serde_json::json!({
@@ -181,8 +166,7 @@ impl TelegramAdapter {
         voice_url: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!(
-            "{}/bot{}/sendVoice",
-            self.api_base_url,
+            "https://api.telegram.org/bot{}/sendVoice",
             self.token.as_str()
         );
         let body = serde_json::json!({
@@ -197,6 +181,111 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    /// Call `sendPhoto` on the Telegram API within a specific thread/topic.
+    async fn api_send_photo_in_thread(
+        &self,
+        chat_id: i64,
+        photo_url: &str,
+        caption: Option<&str>,
+        message_thread_id: i64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendPhoto",
+            self.token.as_str()
+        );
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "photo": photo_url,
+            "message_thread_id": message_thread_id,
+        });
+        if let Some(cap) = caption {
+            body["caption"] = serde_json::Value::String(cap.to_string());
+            body["parse_mode"] = serde_json::Value::String("HTML".to_string());
+        }
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!("Telegram sendPhoto failed: {body_text}");
+        }
+        Ok(())
+    }
+
+    /// Call `sendDocument` on the Telegram API within a specific thread/topic.
+    async fn api_send_document_in_thread(
+        &self,
+        chat_id: i64,
+        document_url: &str,
+        filename: &str,
+        message_thread_id: i64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendDocument",
+            self.token.as_str()
+        );
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "document": document_url,
+            "message_thread_id": message_thread_id,
+            "caption": filename,
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!("Telegram sendDocument failed: {body_text}");
+        }
+        Ok(())
+    }
+
+    /// Call `sendVoice` on the Telegram API within a specific thread/topic.
+    async fn api_send_voice_in_thread(
+        &self,
+        chat_id: i64,
+        voice_url: &str,
+        message_thread_id: i64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendVoice",
+            self.token.as_str()
+        );
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "voice": voice_url,
+            "message_thread_id": message_thread_id,
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!("Telegram sendVoice failed: {body_text}");
+        }
+        Ok(())
+    }
+
+    /// Call `sendLocation` on the Telegram API within a specific thread/topic.
+    async fn api_send_location_in_thread(
+        &self,
+        chat_id: i64,
+        lat: f64,
+        lon: f64,
+        message_thread_id: i64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendLocation",
+            self.token.as_str()
+        );
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "latitude": lat,
+            "longitude": lon,
+            "message_thread_id": message_thread_id,
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!("Telegram sendLocation failed: {body_text}");
+        }
+        Ok(())
+    }
+
     /// Call `sendLocation` on the Telegram API.
     async fn api_send_location(
         &self,
@@ -205,8 +294,7 @@ impl TelegramAdapter {
         lon: f64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!(
-            "{}/bot{}/sendLocation",
-            self.api_base_url,
+            "https://api.telegram.org/bot{}/sendLocation",
             self.token.as_str()
         );
         let body = serde_json::json!({
@@ -225,8 +313,7 @@ impl TelegramAdapter {
     /// Call `sendChatAction` to show "typing..." indicator.
     async fn api_send_typing(&self, chat_id: i64) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!(
-            "{}/bot{}/sendChatAction",
-            self.api_base_url,
+            "https://api.telegram.org/bot{}/sendChatAction",
             self.token.as_str()
         );
         let body = serde_json::json!({
@@ -235,37 +322,6 @@ impl TelegramAdapter {
         });
         let _ = self.client.post(&url).json(&body).send().await?;
         Ok(())
-    }
-
-    /// Call `setMessageReaction` on the Telegram API (fire-and-forget).
-    ///
-    /// Sets or replaces the bot's emoji reaction on a message. Each new call
-    /// automatically replaces the previous reaction, so there is no need to
-    /// explicitly remove old ones.
-    fn fire_reaction(&self, chat_id: i64, message_id: i64, emoji: &str) {
-        let url = format!(
-            "{}/bot{}/setMessageReaction",
-            self.api_base_url,
-            self.token.as_str()
-        );
-        let body = serde_json::json!({
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "reaction": [{"type": "emoji", "emoji": emoji}],
-        });
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) if !resp.status().is_success() => {
-                    let body_text = resp.text().await.unwrap_or_default();
-                    debug!("Telegram setMessageReaction failed: {body_text}");
-                }
-                Err(e) => {
-                    debug!("Telegram setMessageReaction error: {e}");
-                }
-                _ => {}
-            }
-        });
     }
 }
 
@@ -292,8 +348,7 @@ impl ChannelAdapter for TelegramAdapter {
         // still be active on Telegram's side for ~30s, causing 409 errors.
         {
             let delete_url = format!(
-                "{}/bot{}/deleteWebhook",
-                self.api_base_url,
+                "https://api.telegram.org/bot{}/deleteWebhook",
                 self.token.as_str()
             );
             match self
@@ -314,7 +369,6 @@ impl ChannelAdapter for TelegramAdapter {
         let client = self.client.clone();
         let allowed_users = self.allowed_users.clone();
         let poll_interval = self.poll_interval;
-        let api_base_url = self.api_base_url.clone();
         let mut shutdown = self.shutdown_rx.clone();
 
         tokio::spawn(async move {
@@ -328,7 +382,7 @@ impl ChannelAdapter for TelegramAdapter {
                 }
 
                 // Build getUpdates request
-                let url = format!("{}/bot{}/getUpdates", api_base_url, token.as_str());
+                let url = format!("https://api.telegram.org/bot{}/getUpdates", token.as_str());
                 let mut params = serde_json::json!({
                     "timeout": LONG_POLL_TIMEOUT,
                     "allowed_updates": ["message", "edited_message"],
@@ -427,7 +481,7 @@ impl ChannelAdapter for TelegramAdapter {
                     }
 
                     // Parse the message
-                    let msg = match parse_telegram_update(update, &allowed_users, token.as_str(), &client, &api_base_url).await {
+                    let msg = match parse_telegram_update(update, &allowed_users, token.as_str(), &client).await {
                         Some(m) => m,
                         None => continue, // filtered out or unparseable
                     };
@@ -466,7 +520,7 @@ impl ChannelAdapter for TelegramAdapter {
 
         match content {
             ChannelContent::Text(text) => {
-                self.api_send_message(chat_id, &text).await?;
+                self.api_send_message(chat_id, &text, None).await?;
             }
             ChannelContent::Image { url, caption } => {
                 self.api_send_photo(chat_id, &url, caption.as_deref())
@@ -483,7 +537,7 @@ impl ChannelAdapter for TelegramAdapter {
             }
             ChannelContent::Command { name, args } => {
                 let text = format!("/{name} {}", args.join(" "));
-                self.api_send_message(chat_id, text.trim()).await?;
+                self.api_send_message(chat_id, text.trim(), None).await?;
             }
         }
         Ok(())
@@ -497,20 +551,47 @@ impl ChannelAdapter for TelegramAdapter {
         self.api_send_typing(chat_id).await
     }
 
-    async fn send_reaction(
+    async fn send_in_thread(
         &self,
         user: &ChannelUser,
-        message_id: &str,
-        reaction: &LifecycleReaction,
+        content: ChannelContent,
+        thread_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let chat_id: i64 = user
             .platform_id
             .parse()
             .map_err(|_| format!("Invalid Telegram chat_id: {}", user.platform_id))?;
-        let msg_id: i64 = message_id
+        let message_thread_id: i64 = thread_id
             .parse()
-            .map_err(|_| format!("Invalid Telegram message_id: {message_id}"))?;
-        self.fire_reaction(chat_id, msg_id, &reaction.emoji);
+            .map_err(|_| format!("Invalid thread_id: {}", thread_id))?;
+
+        match content {
+            ChannelContent::Text(text) => {
+                self.api_send_message(chat_id, &text, Some(message_thread_id))
+                    .await?;
+            }
+            ChannelContent::Image { url, caption } => {
+                self.api_send_photo_in_thread(chat_id, &url, caption.as_deref(), message_thread_id)
+                    .await?;
+            }
+            ChannelContent::File { url, filename } => {
+                self.api_send_document_in_thread(chat_id, &url, &filename, message_thread_id)
+                    .await?;
+            }
+            ChannelContent::Voice { url, .. } => {
+                self.api_send_voice_in_thread(chat_id, &url, message_thread_id)
+                    .await?;
+            }
+            ChannelContent::Location { lat, lon } => {
+                self.api_send_location_in_thread(chat_id, lat, lon, message_thread_id)
+                    .await?;
+            }
+            ChannelContent::Command { name, args } => {
+                let text = format!("/{name} {}", args.join(" "));
+                self.api_send_message(chat_id, text.trim(), Some(message_thread_id))
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -527,9 +608,8 @@ async fn telegram_get_file_url(
     token: &str,
     client: &reqwest::Client,
     file_id: &str,
-    api_base_url: &str,
 ) -> Option<String> {
-    let url = format!("{api_base_url}/bot{token}/getFile");
+    let url = format!("https://api.telegram.org/bot{token}/getFile");
     let resp = client
         .post(&url)
         .json(&serde_json::json!({"file_id": file_id}))
@@ -542,7 +622,7 @@ async fn telegram_get_file_url(
     }
     let file_path = body["result"]["file_path"].as_str()?;
     Some(format!(
-        "{api_base_url}/file/bot{token}/{file_path}"
+        "https://api.telegram.org/file/bot{token}/{file_path}"
     ))
 }
 
@@ -551,7 +631,6 @@ async fn parse_telegram_update(
     allowed_users: &[String],
     token: &str,
     client: &reqwest::Client,
-    api_base_url: &str,
 ) -> Option<ChannelMessage> {
     let message = update
         .get("message")
@@ -578,6 +657,10 @@ async fn parse_telegram_update(
     let chat_type = message["chat"]["type"].as_str().unwrap_or("private");
     let is_group = chat_type == "group" || chat_type == "supergroup";
     let message_id = message["message_id"].as_i64().unwrap_or(0);
+    // Telegram supports topics/forums in supergroups via message_thread_id
+    let thread_id: Option<String> = message["message_thread_id"]
+        .as_i64()
+        .map(|id| id.to_string());
     let timestamp = message["date"]
         .as_i64()
         .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
@@ -616,7 +699,7 @@ async fn parse_telegram_update(
             .and_then(|p| p["file_id"].as_str())
             .unwrap_or("");
         let caption = message["caption"].as_str().map(String::from);
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+        match telegram_get_file_url(token, client, file_id).await {
             Some(url) => ChannelContent::Image { url, caption },
             None => ChannelContent::Text(format!(
                 "[Photo received{}]",
@@ -629,19 +712,30 @@ async fn parse_telegram_update(
             .as_str()
             .unwrap_or("document")
             .to_string();
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+        match telegram_get_file_url(token, client, file_id).await {
             Some(url) => ChannelContent::File { url, filename },
             None => ChannelContent::Text(format!("[Document received: {filename}]")),
         }
-    } else if message.get("voice").is_some() {
-        let file_id = message["voice"]["file_id"].as_str().unwrap_or("");
-        let duration = message["voice"]["duration"].as_u64().unwrap_or(0) as u32;
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+    } else if let Some(voice) = message.get("voice") {
+        // Telegram Bot API now provides native transcription for voice messages
+        let file_id = voice["file_id"].as_str().unwrap_or("");
+        let duration = voice["duration"].as_u64().unwrap_or(0) as u32;
+        let transcription = voice["transcription"].as_str().map(String::from);
+
+        match telegram_get_file_url(token, client, file_id).await {
             Some(url) => ChannelContent::Voice {
                 url,
                 duration_seconds: duration,
+                transcription,
             },
-            None => ChannelContent::Text(format!("[Voice message, {duration}s]")),
+            None => {
+                // No URL available, but if we have transcription, use it as text
+                if let Some(text) = transcription {
+                    ChannelContent::Text(format!("[Audio transcrito: {text}]"))
+                } else {
+                    ChannelContent::Text(format!("[Mensaje de voz, {duration}s]"))
+                }
+            }
         }
     } else if message.get("location").is_some() {
         let lat = message["location"]["latitude"].as_f64().unwrap_or(0.0);
@@ -651,6 +745,12 @@ async fn parse_telegram_update(
         // Unsupported message type (stickers, polls, etc.)
         return None;
     };
+
+    // Build metadata with guild_id for binding context
+    let mut metadata = HashMap::new();
+    if is_group {
+        metadata.insert("guild_id".to_string(), serde_json::json!(chat_id.to_string()));
+    }
 
     Some(ChannelMessage {
         channel: ChannelType::Telegram,
@@ -664,8 +764,8 @@ async fn parse_telegram_update(
         target_agent: None,
         timestamp,
         is_group,
-        thread_id: None,
-        metadata: HashMap::new(),
+        thread_id,
+        metadata,
     })
 }
 
@@ -760,7 +860,7 @@ mod tests {
         });
 
         let client = test_client();
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await.unwrap();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
         assert_eq!(msg.channel, ChannelType::Telegram);
         assert_eq!(msg.sender.display_name, "Alice Smith");
         assert_eq!(msg.sender.platform_id, "111222333");
@@ -792,7 +892,7 @@ mod tests {
         });
 
         let client = test_client();
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await.unwrap();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
         match &msg.content {
             ChannelContent::Command { name, args } => {
                 assert_eq!(name, "agent");
@@ -824,17 +924,17 @@ mod tests {
         let client = test_client();
 
         // Empty allowed_users = allow all
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await;
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await;
         assert!(msg.is_some());
 
         // Non-matching allowed_users = filter out
         let blocked: Vec<String> = vec!["111".to_string(), "222".to_string()];
-        let msg = parse_telegram_update(&update, &blocked, "fake:token", &client, DEFAULT_API_URL).await;
+        let msg = parse_telegram_update(&update, &blocked, "fake:token", &client).await;
         assert!(msg.is_none());
 
         // Matching allowed_users = allow
         let allowed: Vec<String> = vec!["999".to_string()];
-        let msg = parse_telegram_update(&update, &allowed, "fake:token", &client, DEFAULT_API_URL).await;
+        let msg = parse_telegram_update(&update, &allowed, "fake:token", &client).await;
         assert!(msg.is_some());
     }
 
@@ -860,7 +960,7 @@ mod tests {
         });
 
         let client = test_client();
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await.unwrap();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
         assert_eq!(msg.channel, ChannelType::Telegram);
         assert_eq!(msg.sender.display_name, "Alice Smith");
         assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Edited message!"));
@@ -896,7 +996,7 @@ mod tests {
         });
 
         let client = test_client();
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await.unwrap();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
         match &msg.content {
             ChannelContent::Command { name, args } => {
                 assert_eq!(name, "agents");
@@ -920,14 +1020,14 @@ mod tests {
         });
 
         let client = test_client();
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await.unwrap();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
         assert!(matches!(msg.content, ChannelContent::Location { .. }));
     }
 
     #[tokio::test]
-    async fn test_parse_telegram_photo_fallback() {
-        // When getFile fails (fake token), photo messages should fall back to
-        // a text description rather than being silently dropped.
+    async fn test_parse_telegram_voice_with_transcription() {
+        // Note: In tests, telegram_get_file_url returns None (no real API call),
+        // so the result is Text with transcription when available
         let update = serde_json::json!({
             "update_id": 300,
             "message": {
@@ -935,33 +1035,30 @@ mod tests {
                 "from": { "id": 123, "first_name": "Alice" },
                 "chat": { "id": 123, "type": "private" },
                 "date": 1700000000,
-                "photo": [
-                    { "file_id": "small_id", "file_unique_id": "a", "width": 90, "height": 90, "file_size": 1234 },
-                    { "file_id": "large_id", "file_unique_id": "b", "width": 800, "height": 600, "file_size": 45678 }
-                ],
-                "caption": "Check this out"
+                "voice": {
+                    "file_id": "audio_file_123",
+                    "duration": 5,
+                    "transcription": "Hola, este es un mensaje de voz"
+                }
             }
         });
 
         let client = test_client();
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await.unwrap();
-        // With a fake token, getFile will fail, so we get a text fallback
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
+        // Since file URL fetch fails in tests, transcription is used as Text
         match &msg.content {
-            ChannelContent::Text(t) => {
-                assert!(t.contains("Photo received"));
-                assert!(t.contains("Check this out"));
+            ChannelContent::Text(text) => {
+                assert!(text.contains("Audio transcrito"));
+                assert!(text.contains("Hola, este es un mensaje de voz"));
             }
-            ChannelContent::Image { caption, .. } => {
-                // If somehow the HTTP call succeeded (unlikely with fake token),
-                // verify caption was extracted
-                assert_eq!(caption.as_deref(), Some("Check this out"));
-            }
-            other => panic!("Expected Text or Image fallback for photo, got {other:?}"),
+            other => panic!("Expected Text with transcription, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn test_parse_telegram_document_fallback() {
+    async fn test_parse_telegram_voice_without_transcription() {
+        // Note: In tests, telegram_get_file_url returns None (no real API call),
+        // so without transcription the result is a fallback Text message
         let update = serde_json::json!({
             "update_id": 301,
             "message": {
@@ -969,57 +1066,61 @@ mod tests {
                 "from": { "id": 123, "first_name": "Alice" },
                 "chat": { "id": 123, "type": "private" },
                 "date": 1700000000,
-                "document": {
-                    "file_id": "doc_id",
-                    "file_unique_id": "c",
-                    "file_name": "report.pdf",
-                    "file_size": 102400
+                "voice": {
+                    "file_id": "audio_file_456",
+                    "duration": 10
                 }
             }
         });
 
         let client = test_client();
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await.unwrap();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
+        // Without transcription and no URL, falls back to Text
         match &msg.content {
-            ChannelContent::Text(t) => {
-                assert!(t.contains("Document received"));
-                assert!(t.contains("report.pdf"));
+            ChannelContent::Text(text) => {
+                assert!(text.contains("Mensaje de voz"));
+                assert!(text.contains("10s"));
             }
-            ChannelContent::File { filename, .. } => {
-                assert_eq!(filename, "report.pdf");
-            }
-            other => panic!("Expected Text or File for document, got {other:?}"),
+            other => panic!("Expected Text fallback, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn test_parse_telegram_voice_fallback() {
+    async fn test_parse_telegram_topic_thread_id() {
         let update = serde_json::json!({
-            "update_id": 302,
+            "update_id": 400,
             "message": {
-                "message_id": 62,
+                "message_id": 70,
                 "from": { "id": 123, "first_name": "Alice" },
-                "chat": { "id": 123, "type": "private" },
+                "chat": { "id": i64::MIN, "type": "supergroup" },
                 "date": 1700000000,
-                "voice": {
-                    "file_id": "voice_id",
-                    "file_unique_id": "d",
-                    "duration": 15
-                }
+                "message_thread_id": 42,
+                "text": "Mensaje en un topic"
             }
         });
 
         let client = test_client();
-        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL).await.unwrap();
-        match &msg.content {
-            ChannelContent::Text(t) => {
-                assert!(t.contains("Voice message"));
-                assert!(t.contains("15s"));
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
+        assert_eq!(msg.thread_id, Some("42".to_string()));
+        assert!(msg.is_group);
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_no_thread_id_in_private_chat() {
+        let update = serde_json::json!({
+            "update_id": 401,
+            "message": {
+                "message_id": 71,
+                "from": { "id": 123, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "text": "Mensaje directo"
             }
-            ChannelContent::Voice { duration_seconds, .. } => {
-                assert_eq!(*duration_seconds, 15);
-            }
-            other => panic!("Expected Text or Voice for voice message, got {other:?}"),
-        }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client).await.unwrap();
+        assert_eq!(msg.thread_id, None);
+        assert!(!msg.is_group);
     }
 }

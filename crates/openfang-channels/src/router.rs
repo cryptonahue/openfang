@@ -18,6 +18,8 @@ pub struct BindingContext {
     pub peer_id: String,
     /// Guild/server ID.
     pub guild_id: Option<String>,
+    /// Topic/thread ID for forum-style channels (Telegram topics, Discord threads).
+    pub topic_id: Option<String>,
     /// User's roles.
     pub roles: Vec<String>,
 }
@@ -124,6 +126,7 @@ impl AgentRouter {
             account_id: None,
             peer_id: platform_user_id.to_string(),
             guild_id: None,
+            topic_id: None,
             roles: Vec::new(),
         };
         if let Some(agent_id) = self.resolve_binding(&ctx) {
@@ -298,6 +301,11 @@ impl AgentRouter {
         }
         if let Some(ref gid) = rule.guild_id {
             if ctx.guild_id.as_ref() != Some(gid) {
+                return false;
+            }
+        }
+        if let Some(ref tid) = rule.topic_id {
+            if ctx.topic_id.as_ref() != Some(tid) {
                 return false;
             }
         }
@@ -608,9 +616,10 @@ mod tests {
             channel: Some("discord".to_string()),
             peer_id: Some("user".to_string()),
             guild_id: Some("guild".to_string()),
+            topic_id: Some("topic1".to_string()),
             roles: vec!["admin".to_string()],
             account_id: Some("bot".to_string()),
         };
-        assert_eq!(full.specificity(), 17); // 8+4+2+2+1
+        assert_eq!(full.specificity(), 21); // 8+4+4+2+2+1
     }
 }

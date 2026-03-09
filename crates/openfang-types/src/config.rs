@@ -661,8 +661,10 @@ pub struct BindingMatchRule {
     pub account_id: Option<String>,
     /// Peer/user ID for DM routing.
     pub peer_id: Option<String>,
-    /// Guild/server ID (Discord/Slack).
+    /// Guild/server ID (Discord/Slack/Telegram supergroup).
     pub guild_id: Option<String>,
+    /// Topic/thread ID for forum-style channels (Telegram topics, Discord threads).
+    pub topic_id: Option<String>,
     /// Role-based routing (user must have at least one).
     #[serde(default)]
     pub roles: Vec<String>,
@@ -678,6 +680,9 @@ impl BindingMatchRule {
         }
         if self.guild_id.is_some() {
             score += 4;
+        }
+        if self.topic_id.is_some() {
+            score += 4; // Same weight as guild_id
         }
         if !self.roles.is_empty() {
             score += 2;
