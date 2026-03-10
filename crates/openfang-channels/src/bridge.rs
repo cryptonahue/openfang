@@ -414,6 +414,12 @@ async fn dispatch_message(
 ) {
     let ct_str = channel_type_str(&message.channel);
 
+    // Debug logging for Telegram messages
+    if ct_str == "telegram" {
+        tracing::info!("Telegram message received: is_group={}, thread_id={:?}, guild_id={:?}",
+            message.is_group, message.thread_id, message.metadata.get("guild_id"));
+    }
+
     // Fetch per-channel overrides (if configured)
     let overrides = handle.channel_overrides(ct_str).await;
     let channel_default_format = match ct_str {

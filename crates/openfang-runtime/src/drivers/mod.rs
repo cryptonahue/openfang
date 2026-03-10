@@ -24,6 +24,9 @@ use openfang_types::model_catalog::{
 };
 use std::sync::Arc;
 
+/// Alibaba DashScope international coding endpoint
+const ALIBABA_CODING_BASE_URL: &str = "https://coding-intl.dashscope.aliyuncs.com/v1";
+
 /// Provider metadata: base URL and env var name for the API key.
 struct ProviderDefaults {
     base_url: &'static str,
@@ -157,6 +160,11 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
         }),
         "qwen" | "dashscope" | "model_studio" => Some(ProviderDefaults {
             base_url: QWEN_BASE_URL,
+            api_key_env: "DASHSCOPE_API_KEY",
+            key_required: true,
+        }),
+        "alibaba_coding" => Some(ProviderDefaults {
+            base_url: ALIBABA_CODING_BASE_URL,
             api_key_env: "DASHSCOPE_API_KEY",
             key_required: true,
         }),
@@ -381,7 +389,9 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, gemini, openai, groq, openrouter, \
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             venice, codex, claude-code. Or set base_url for a custom OpenAI-compatible endpoint.",
+             venice, codex, claude-code, dashscope, alibaba_coding, qwen, minimax, zhipu, glm, \
+             zhipu_coding, codegeex, zai, zai_coding, qianfan, baidu, volcengine, doubao, \
+             volcengine_coding, moonshot, kimi. Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
     })
@@ -444,12 +454,23 @@ pub fn known_providers() -> &'static [&'static str] {
         "replicate",
         "github-copilot",
         "moonshot",
+        "kimi",
         "qwen",
+        "dashscope",
+        "alibaba_coding",
+        "model_studio",
         "minimax",
         "zhipu",
+        "glm",
         "zhipu_coding",
+        "codegeex",
+        "zai",
+        "zai_coding",
         "qianfan",
+        "baidu",
         "volcengine",
+        "doubao",
+        "volcengine_coding",
         "venice",
         "codex",
         "claude-code",
