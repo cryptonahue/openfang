@@ -544,6 +544,34 @@ async fn telegram_get_file_url(
     Some(format!("{api_base_url}/file/bot{token}/{file_path}"))
 }
 
+/// Download a Telegram file to a temporary location and return the local path.
+async fn telegram_download_file(
+    token: &str,
+    client: &reqwest::Client,
+    file_id: &str,
+    api_base_url: &str,
+    ext: &str,
+) -> Option<String> {
+    use std::io::Write;
+    
+    // Get file URL
+    let file_url = telegram_get_file_url(token, client, file_id, api_base_url).await?;
+    
+    // Download file
+    let resp = client.get(&file_url).send().await.ok()?;
+    let bytes = resp.bytes().await.ok()?;
+    
+    // Save to temp directory
+    let temp_dir = std::path::PathBuf::from("/root/.openfang/workspaces/assistant/inbox/");
+    let filename = format!("telegram_{}.{}", file_id.replace(":", "_"), ext);
+    let file_path = temp_dir.join(&filename);
+    
+    let mut file = std::fs::File::create(&file_path).ok()?;
+    file.write_all(&bytes).ok()?;
+    
+    Some(file_path.to_string_lossy().to_string())
+}
+
 async fn parse_telegram_update(
     update: &serde_json::Value,
     allowed_users: &[String],
@@ -640,14 +668,18 @@ async fn parse_telegram_update(
         let transcription = message["voice"]["transcription"]
             .as_str()
             .map(|s| s.to_string());
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
-            Some(url) => ChannelContent::Voice {
-                url,
+        
+        // Download voice file to temp directory
+        let voice_path = telegram_download_file(token, client, file_id, api_base_url, "oga").await;
+        
+        match voice_path {
+            Some(path) => ChannelContent::Voice {
+                url: format!("file://{}", path),
                 duration_seconds: duration,
                 transcription,
             },
             None => {
-                // If transcription is available, use it; otherwise show duration
+                // If download fails but transcription is available, use it
                 if let Some(text) = &transcription {
                     ChannelContent::Text(format!("[Voice message, {duration}s: {text}]"))
                 } else {
