@@ -75,6 +75,10 @@ pub struct MediaConfig {
     pub image_provider: Option<String>,
     /// Preferred audio transcription provider (auto-detect if None).
     pub audio_provider: Option<String>,
+    /// Ordered list of audio providers for fallback cascade. Default: ["groq", "openai", "local_whisper"].
+    pub audio_providers: Option<Vec<String>>,
+    /// Local Whisper model to use. Default: "large-v3-turbo".
+    pub local_whisper_model: Option<String>,
 }
 
 impl Default for MediaConfig {
@@ -86,6 +90,14 @@ impl Default for MediaConfig {
             max_concurrency: 2,
             image_provider: None,
             audio_provider: None,
+            audio_providers: Some(vec![
+                "local_whisper".to_string(),
+                "groq".to_string(),
+                "deepgram".to_string(),
+                "assemblyai".to_string(),
+                "openai".to_string(),
+            ]),
+            local_whisper_model: Some("small".to_string()),
         }
     }
 }

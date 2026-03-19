@@ -9,10 +9,10 @@ use openfang_types::model_catalog::{
     FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL,
     HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL,
     MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
-    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
-    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL,
-    VOLCENGINE_BASE_URL, VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL,
-    ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
+    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
+    VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
+    ZHIPU_CODING_BASE_URL,
 };
 use std::collections::HashMap;
 
@@ -59,12 +59,11 @@ impl ModelCatalog {
             // Claude Code is special: no API key needed, but we probe for CLI
             // installation so the dashboard shows "Configured" vs "Not Installed".
             if provider.id == "claude-code" {
-                provider.auth_status =
-                    if crate::drivers::claude_code::claude_code_available() {
-                        AuthStatus::Configured
-                    } else {
-                        AuthStatus::Missing
-                    };
+                provider.auth_status = if crate::drivers::claude_code::claude_code_available() {
+                    AuthStatus::Configured
+                } else {
+                    AuthStatus::Missing
+                };
                 continue;
             }
 
@@ -80,8 +79,7 @@ impl ModelCatalog {
             let has_fallback = match provider.id.as_str() {
                 "gemini" => std::env::var("GOOGLE_API_KEY").is_ok(),
                 "codex" => {
-                    std::env::var("OPENAI_API_KEY").is_ok()
-                        || read_codex_credential().is_some()
+                    std::env::var("OPENAI_API_KEY").is_ok() || read_codex_credential().is_some()
                 }
                 // claude-code is handled above (before key_required check)
                 _ => false,
@@ -2809,6 +2807,133 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             aliases: vec![],
         },
         // ══════════════════════════════════════════════════════════════
+        // DashScope Coding Plan — International
+        // All accessed via ALIBABA_CODING_API_KEY on alibaba_coding provider.
+        // Model IDs use "alibaba_coding/<model>" format — the provider prefix is
+        // stripped automatically by strip_provider_prefix() before the API call,
+        // so the API receives the bare model name (e.g. "glm-5", "kimi-k2.5").
+        // This mirrors the OpenRouter pattern and avoids collisions with native providers.
+        // ══════════════════════════════════════════════════════════════
+        // ── Qwen (4) ────────────────────────────────────────────────
+        ModelCatalogEntry {
+            id: "qwen3.5-plus".into(),
+            display_name: "Qwen 3.5 Plus".into(),
+            provider: "alibaba_coding".into(),
+            tier: ModelTier::Smart,
+            context_window: 1_000_000,
+            max_output_tokens: 65_536,
+            input_cost_per_m: 0.40,
+            output_cost_per_m: 2.40,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "qwen3-max-2026-01-23".into(),
+            display_name: "Qwen 3 Max (2026-01-23)".into(),
+            provider: "alibaba_coding".into(),
+            tier: ModelTier::Frontier,
+            context_window: 131_072,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 4.00,
+            output_cost_per_m: 16.00,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "qwen3-coder-plus".into(),
+            display_name: "Qwen 3 Coder Plus".into(),
+            provider: "alibaba_coding".into(),
+            tier: ModelTier::Smart,
+            context_window: 131_072,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 0.80,
+            output_cost_per_m: 3.20,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["qwen3-coder".into()],
+        },
+        ModelCatalogEntry {
+            id: "qwen3-coder-next".into(),
+            display_name: "Qwen 3 Coder Next".into(),
+            provider: "alibaba_coding".into(),
+            tier: ModelTier::Frontier,
+            context_window: 131_072,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 4.00,
+            output_cost_per_m: 16.00,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        // ── Zhipu / GLM via Coding Plan (2) ─────────────────────────
+        // API receives "glm-5" / "glm-4.7" after prefix stripping.
+        ModelCatalogEntry {
+            id: "alibaba_coding/glm-5".into(),
+            display_name: "GLM-5 (Coding Plan)".into(),
+            provider: "alibaba_coding".into(),
+            tier: ModelTier::Frontier,
+            context_window: 128_000,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 4.00,
+            output_cost_per_m: 16.00,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "alibaba_coding/glm-4.7".into(),
+            display_name: "GLM-4.7 (Coding Plan)".into(),
+            provider: "alibaba_coding".into(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 0.80,
+            output_cost_per_m: 3.20,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        // ── Moonshot / Kimi via Coding Plan (1) ─────────────────────
+        // API receives "kimi-k2.5" after prefix stripping.
+        ModelCatalogEntry {
+            id: "alibaba_coding/kimi-k2.5".into(),
+            display_name: "Kimi K2.5 (Coding Plan)".into(),
+            provider: "alibaba_coding".into(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 0.80,
+            output_cost_per_m: 3.20,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        // ── MiniMax via Coding Plan (1) ──────────────────────────────
+        // API receives "MiniMax-M2.5" after prefix stripping.
+        ModelCatalogEntry {
+            id: "alibaba_coding/MiniMax-M2.5".into(),
+            display_name: "MiniMax M2.5 (Coding Plan)".into(),
+            provider: "alibaba_coding".into(),
+            tier: ModelTier::Smart,
+            context_window: 1_000_000,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 0.80,
+            output_cost_per_m: 3.20,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        // ══════════════════════════════════════════════════════════════
         // MiniMax (6)
         // ══════════════════════════════════════════════════════════════
         ModelCatalogEntry {
@@ -3584,10 +3709,7 @@ mod tests {
     #[test]
     fn test_resolve_alias() {
         let catalog = ModelCatalog::new();
-        assert_eq!(
-            catalog.resolve_alias("sonnet"),
-            Some("claude-sonnet-4-6")
-        );
+        assert_eq!(catalog.resolve_alias("sonnet"), Some("claude-sonnet-4-6"));
         assert_eq!(
             catalog.resolve_alias("haiku"),
             Some("claude-haiku-4-5-20251001")

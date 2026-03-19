@@ -54,7 +54,7 @@ impl MediaEngine {
     }
 
     /// Transcribe audio using speech-to-text.
-    /// Auto-cascade: Groq (whisper-large-v3-turbo) -> OpenAI (whisper-1).
+    /// Auto-cascade through configured providers: Groq -> OpenAI -> Local Whisper.
     pub async fn transcribe_audio(
         &self,
         attachment: &MediaAttachment,
@@ -64,16 +64,53 @@ impl MediaEngine {
             return Err("Expected audio attachment".into());
         }
 
-        let provider = self
-            .config
-            .audio_provider
-            .as_deref()
-            .or_else(|| detect_audio_provider())
-            .ok_or(
-                "No audio transcription provider configured. Set GROQ_API_KEY or OPENAI_API_KEY",
-            )?;
+        // Get provider list from config or use default cascade
+        let providers = self.config.audio_providers.clone().unwrap_or_else(|| {
+            vec![
+                "groq".to_string(),
+                "openai".to_string(),
+                "local_whisper".to_string(),
+            ]
+        });
+
+        // Try each provider in order until one succeeds
+        let mut last_error: Option<String> = None;
+        for provider in &providers {
+            match self
+                .transcribe_audio_with_provider(attachment, provider.as_str())
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    info!(
+                        provider = %provider,
+                        error = %e,
+                        "Provider failed, trying next in cascade"
+                    );
+                    last_error = Some(format!("{}: {}", provider, e));
+                }
+            }
+        }
+
+        Err(format!(
+            "All transcription providers failed. Last error: {}",
+            last_error.unwrap_or_else(|| "Unknown error".to_string())
+        ))
+    }
+
+    /// Transcribe audio with a specific provider.
+    async fn transcribe_audio_with_provider(
+        &self,
+        attachment: &MediaAttachment,
+        provider: &str,
+    ) -> Result<MediaUnderstanding, String> {
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
+
+        // Handle local Whisper separately
+        if provider == "local_whisper" {
+            return self.transcribe_with_local_whisper(attachment).await;
+        }
 
         // Derive a proper filename with extension from mime_type
         // (Whisper APIs require an extension to detect format)
@@ -119,41 +156,194 @@ impl MediaEngine {
                 "https://api.openai.com/v1/audio/transcriptions",
                 std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?,
             ),
+            "deepgram" => (
+                "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&detect_language=true",
+                std::env::var("DEEPGRAM_API_KEY").map_err(|_| "DEEPGRAM_API_KEY not set")?,
+            ),
+            "assemblyai" => (
+                "https://api.assemblyai.com/v2/upload",
+                std::env::var("ASSEMBLYAI_API_KEY").map_err(|_| "ASSEMBLYAI_API_KEY not set")?,
+            ),
             other => return Err(format!("Unsupported audio provider: {}", other)),
         };
 
         info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
 
-        let file_part = reqwest::multipart::Part::bytes(audio_bytes)
-            .file_name(filename)
-            .mime_str(&attachment.mime_type)
-            .map_err(|e| format!("Failed to set MIME type: {}", e))?;
+        // Handle different provider APIs
+        let transcription = match provider {
+            "groq" | "openai" => {
+                // Whisper-compatible API (multipart form with model)
+                let file_part = reqwest::multipart::Part::bytes(audio_bytes)
+                    .file_name(filename)
+                    .mime_str(&attachment.mime_type)
+                    .map_err(|e| format!("Failed to set MIME type: {}", e))?;
 
-        let form = reqwest::multipart::Form::new()
-            .part("file", file_part)
-            .text("model", model.to_string())
-            .text("response_format", "text");
+                let form = reqwest::multipart::Form::new()
+                    .part("file", file_part)
+                    .text("model", model.to_string())
+                    .text("response_format", "text");
 
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(api_url)
-            .bearer_auth(&api_key)
-            .multipart(form)
-            .timeout(std::time::Duration::from_secs(60))
-            .send()
-            .await
-            .map_err(|e| format!("Transcription request failed: {}", e))?;
+                let client = reqwest::Client::new();
+                let resp = client
+                    .post(api_url)
+                    .bearer_auth(&api_key)
+                    .multipart(form)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Transcription request failed: {}", e))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Transcription API error ({}): {}", status, body));
-        }
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(format!("Transcription API error ({}): {}", status, body));
+                }
 
-        let transcription = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read transcription response: {}", e))?;
+                resp.text()
+                    .await
+                    .map_err(|e| format!("Failed to read transcription response: {}", e))?
+            }
+            "deepgram" => {
+                // Deepgram API: POST audio directly, get JSON response
+                let client = reqwest::Client::new();
+                let resp = client
+                    .post(api_url)
+                    .header("Authorization", format!("Token {}", api_key))
+                    .header("Content-Type", "audio/*")
+                    .body(audio_bytes)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Deepgram request failed: {}", e))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(format!("Deepgram API error ({}): {}", status, body));
+                }
+
+                // Parse JSON response: { "results": { "channels": [{ "alternatives": [{ "transcript": "..." }] }] } }
+                let json: serde_json::Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse Deepgram response: {}", e))?;
+
+                json["results"]["channels"][0]["alternatives"][0]["transcript"]
+                    .as_str()
+                    .ok_or("Deepgram returned empty transcript")?
+                    .to_string()
+            }
+            "assemblyai" => {
+                // AssemblyAI API: 1) Upload, 2) Poll transcript, 3) Get result
+                // Step 1: Upload audio
+                let client = reqwest::Client::new();
+                
+                let upload_resp = client
+                    .post(api_url)
+                    .header("authorization", &api_key)
+                    .header("content-type", "application/octet-stream")
+                    .body(audio_bytes.clone())
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await
+                    .map_err(|e| format!("AssemblyAI upload failed: {}", e))?;
+
+                if !upload_resp.status().is_success() {
+                    let status = upload_resp.status();
+                    let body = upload_resp.text().await.unwrap_or_default();
+                    return Err(format!("AssemblyAI upload error ({}): {}", status, body));
+                }
+
+                let upload_json: serde_json::Value = upload_resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse AssemblyAI upload response: {}", e))?;
+
+                let upload_url = upload_json["upload_url"]
+                    .as_str()
+                    .ok_or("AssemblyAI did not return upload_url")?;
+
+                // Step 2: Create transcript request with speech_models
+                let transcript_req = serde_json::json!({
+                    "audio_url": upload_url,
+                    "speech_models": ["universal-2"]
+                });
+                
+                let transcript_resp = client
+                    .post("https://api.assemblyai.com/v2/transcript")
+                    .header("authorization", &api_key)
+                    .header("content-type", "application/json")
+                    .json(&transcript_req)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await
+                    .map_err(|e| format!("AssemblyAI transcript request failed: {}", e))?;
+
+                if !transcript_resp.status().is_success() {
+                    let status = transcript_resp.status();
+                    let body = transcript_resp.text().await.unwrap_or_default();
+                    return Err(format!("AssemblyAI transcript error ({}): {}", status, body));
+                }
+
+                let transcript_json: serde_json::Value = transcript_resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse AssemblyAI transcript response: {}", e))?;
+
+                let transcript_id = transcript_json["id"]
+                    .as_str()
+                    .ok_or("AssemblyAI did not return transcript id")?;
+
+                // Step 3: Poll until complete
+                let mut attempts = 0;
+                let max_attempts = 60; // 30 seconds max
+                let mut final_text = String::new();
+
+                while attempts < max_attempts {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    
+                    let status_resp = client
+                        .get(format!("https://api.assemblyai.com/v2/transcript/{}", transcript_id))
+                        .header("authorization", &api_key)
+                        .timeout(std::time::Duration::from_secs(30))
+                        .send()
+                        .await
+                        .map_err(|e| format!("AssemblyAI status check failed: {}", e))?;
+
+                    let status_json: serde_json::Value = status_resp
+                        .json()
+                        .await
+                        .map_err(|e| format!("Failed to parse AssemblyAI status: {}", e))?;
+
+                    let status = status_json["status"].as_str().unwrap_or("unknown");
+                    
+                    match status {
+                        "completed" => {
+                            final_text = status_json["text"]
+                                .as_str()
+                                .ok_or("AssemblyAI returned empty transcript")?
+                                .to_string();
+                            break;
+                        }
+                        "error" => {
+                            return Err(format!("AssemblyAI transcription failed: {}", 
+                                status_json["error"].as_str().unwrap_or("unknown error")));
+                        }
+                        _ => {
+                            attempts += 1;
+                            continue;
+                        }
+                    }
+                }
+
+                if final_text.is_empty() {
+                    return Err("AssemblyAI transcription timed out".into());
+                }
+
+                final_text
+            }
+            other => return Err(format!("Unsupported audio provider: {}", other)),
+        };
 
         let transcription = transcription.trim().to_string();
         if transcription.is_empty() {
@@ -235,6 +425,92 @@ impl MediaEngine {
         }
         results
     }
+
+    /// Transcribe audio using local Whisper CLI (faster-whisper).
+    async fn transcribe_with_local_whisper(
+        &self,
+        attachment: &MediaAttachment,
+    ) -> Result<MediaUnderstanding, String> {
+        use tokio::process::Command;
+
+        // Get file path
+        let file_path = match &attachment.source {
+            MediaSource::FilePath { path } => path.clone(),
+            MediaSource::Base64 { .. } => {
+                return Err("Local Whisper requires file path, not base64".into());
+            }
+            MediaSource::Url { .. } => {
+                return Err("Local Whisper requires file path, not URL".into());
+            }
+        };
+
+        // Get model from config or default
+        let model = self
+            .config
+            .local_whisper_model
+            .as_deref()
+            .unwrap_or("small");
+
+        info!(
+            model = %model,
+            path = %file_path,
+            "Transcribing with local faster-whisper"
+        );
+
+        // Run faster-whisper via Python
+        // python3 -c "from faster_whisper import WhisperModel; model = WhisperModel('small'); segments, info = model.transcribe('audio.oga', language='es'); print(''.join([s.text for s in segments]))"
+        let python_script = format!(
+            r#"
+from faster_whisper import WhisperModel
+import sys
+
+model = WhisperModel('{}', device='cpu', compute_type='int8')
+segments, info = model.transcribe('{}', language='es')
+text = ''.join([segment.text for segment in segments]).strip()
+print(text)
+"#,
+            model, file_path
+        );
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            Command::new("python3")
+                .arg("-c")
+                .arg(&python_script)
+                .output()
+        )
+        .await
+        .map_err(|e| format!("Whisper transcription timed out: {}", e))?
+        .map_err(|e| format!("Failed to run faster-whisper: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!(
+                "faster-whisper failed: {}\n{}",
+                stderr, stdout
+            ));
+        }
+
+        let transcription = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        if transcription.is_empty() {
+            return Err("Transcription returned empty text".into());
+        }
+
+        info!(
+            model = %model,
+            chars = transcription.len(),
+            "Local faster-whisper transcription complete"
+        );
+
+        Ok(MediaUnderstanding {
+            media_type: MediaType::Audio,
+            description: transcription,
+            provider: "local_whisper".to_string(),
+            model: format!("faster-whisper-{}", model),
+        })
+    }
 }
 
 /// Detect which vision provider is available based on environment variables.
@@ -252,12 +528,33 @@ fn detect_vision_provider() -> Option<&'static str> {
 }
 
 /// Detect which audio transcription provider is available.
+#[allow(dead_code)]
 fn detect_audio_provider() -> Option<&'static str> {
+    // Check in order of preference (cost/speed)
     if std::env::var("GROQ_API_KEY").is_ok() {
         return Some("groq");
     }
+    if std::env::var("DEEPGRAM_API_KEY").is_ok() {
+        return Some("deepgram");
+    }
+    if std::env::var("ASSEMBLYAI_API_KEY").is_ok() {
+        return Some("assemblyai");
+    }
     if std::env::var("OPENAI_API_KEY").is_ok() {
         return Some("openai");
+    }
+    // Check if faster-whisper is available (preferred)
+    if std::process::Command::new("python3")
+        .arg("-c")
+        .arg("from faster_whisper import WhisperModel")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        return Some("local_whisper");
+    }
+    // Fallback to original whisper CLI
+    if std::process::Command::new("which").arg("whisper").output().is_ok() {
+        return Some("local_whisper");
     }
     None
 }
@@ -277,6 +574,9 @@ fn default_audio_model(provider: &str) -> &str {
     match provider {
         "groq" => "whisper-large-v3-turbo",
         "openai" => "whisper-1",
+        "deepgram" => "nova-2",
+        "assemblyai" => "best",
+        "local_whisper" => "large-v3-turbo",
         _ => "unknown",
     }
 }
